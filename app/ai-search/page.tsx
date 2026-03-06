@@ -125,7 +125,7 @@ export default function AISearchPage() {
   return (
     <div className="p-8 max-w-4xl mx-auto">
       {/* Header */}
-      <div className="mb-10 text-center">
+      <div className="mb-6 text-center">
         <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-medium mb-4">
           <Sparkles size={12} /> AI-Powered Search
         </div>
