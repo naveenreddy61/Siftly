@@ -112,6 +112,7 @@ function ApiKeyField({
   const [key, setKey] = useState('')
   const [showKey, setShowKey] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [removing, setRemoving] = useState(false)
   const [savedMasked, setSavedMasked] = useState<string | null>(null)
   const [testState, setTestState] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle')
   const [testError, setTestError] = useState('')
@@ -160,6 +161,28 @@ function ApiKeyField({
     }
   }
 
+  async function handleRemove() {
+    setRemoving(true)
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: fieldKey }),
+      })
+      if (!res.ok) {
+        const data = await res.json() as { error?: string }
+        throw new Error(data.error ?? 'Failed to remove')
+      }
+      setSavedMasked(null)
+      setTestState('idle')
+      onToast({ type: 'success', message: `${label} removed` })
+    } catch (err) {
+      onToast({ type: 'error', message: err instanceof Error ? err.message : 'Failed to remove key' })
+    } finally {
+      setRemoving(false)
+    }
+  }
+
   async function handleTest() {
     if (!testProvider) return
     setTestState('testing')
@@ -193,6 +216,16 @@ function ApiKeyField({
             <span className="flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-lg min-w-0 overflow-hidden">
               <Check size={11} className="shrink-0" /> <span className="shrink-0">Saved:</span> <span className="font-mono truncate">{savedMasked}</span>
             </span>
+          )}
+          {savedMasked && (
+            <button
+              onClick={() => void handleRemove()}
+              disabled={removing}
+              className="shrink-0 text-xs text-red-500/70 hover:text-red-400 transition-colors disabled:opacity-50"
+              title="Remove saved key"
+            >
+              {removing ? 'Removing…' : 'Remove'}
+            </button>
           )}
           {testProvider && savedMasked && testState === 'idle' && (
             <button
@@ -329,36 +362,65 @@ function ModelSelector({
   )
 }
 
-function ClaudeSetupBox() {
-  const [copied, setCopied] = useState(false)
-  const CMD = 'claude setup-token'
+interface CliStatus {
+  available: boolean
+  subscriptionType?: string
+  expired?: boolean
+}
 
-  function copy() {
-    void navigator.clipboard.writeText(CMD).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    })
+function ClaudeCliStatusBox() {
+  const [status, setStatus] = useState<CliStatus | null>(null)
+
+  useEffect(() => {
+    fetch('/api/settings/cli-status')
+      .then((r) => r.json())
+      .then((d: CliStatus) => setStatus(d))
+      .catch(() => setStatus({ available: false }))
+  }, [])
+
+  if (status === null) return null // loading — don't flash UI
+
+  if (status.available && !status.expired) {
+    const tier = status.subscriptionType
+      ? status.subscriptionType.charAt(0).toUpperCase() + status.subscriptionType.slice(1)
+      : 'CLI'
+    return (
+      <div className="flex gap-3 p-3.5 rounded-xl bg-emerald-500/5 border border-emerald-500/20 mb-5">
+        <Check size={15} className="text-emerald-400 shrink-0 mt-0.5" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-emerald-300">
+            Claude CLI detected — no API key needed
+          </p>
+          <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">
+            Signed in as <span className="text-zinc-300">{tier}</span> via Claude Code. Siftly will use your subscription automatically. An API key below will take priority if set.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  if (status.available && status.expired) {
+    return (
+      <div className="flex gap-3 p-3.5 rounded-xl bg-amber-500/5 border border-amber-500/20 mb-5">
+        <AlertCircle size={15} className="text-amber-400 shrink-0 mt-0.5" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-amber-300">Claude CLI session expired</p>
+          <p className="text-xs text-zinc-500 mt-0.5">
+            Run <span className="font-mono text-zinc-300">claude</span> in your terminal to refresh the session, then reload this page.
+          </p>
+        </div>
+      </div>
+    )
   }
 
   return (
     <div className="flex gap-3 p-3.5 rounded-xl bg-zinc-800/60 border border-zinc-700 mb-5">
       <Terminal size={15} className="text-zinc-400 shrink-0 mt-0.5" />
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium text-zinc-200">Get your API key from the terminal</p>
+        <p className="text-sm font-medium text-zinc-200">No Claude CLI detected</p>
         <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">
-          Using Claude CLI? Run this command — it prints your auth token directly.
+          Install Claude Code and sign in to skip the API key entirely, or paste your API key below.
         </p>
-        <button
-          onClick={copy}
-          className="mt-2 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-700 hover:border-zinc-500 transition-colors group w-full max-w-xs"
-        >
-          <span className="font-mono text-xs text-indigo-300 flex-1 text-left">{CMD}</span>
-          {copied
-            ? <Check size={13} className="text-emerald-400 shrink-0" />
-            : <Copy size={13} className="text-zinc-600 group-hover:text-zinc-300 transition-colors shrink-0" />
-          }
-        </button>
-        {copied && <p className="text-[10px] text-emerald-400 mt-1">Copied!</p>}
       </div>
     </div>
   )
@@ -369,10 +431,10 @@ function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
     <Section
       icon={Key}
       title="AI Provider"
-      description="Configure your AI API key. Claude is used for categorization and semantic search. OpenAI works as an alternative."
+      description="Configure your AI keys. If Claude Code CLI is installed and signed in, no key is needed."
     >
-      {/* Claude CLI setup tip */}
-      <ClaudeSetupBox />
+      {/* Claude CLI auth status */}
+      <ClaudeCliStatusBox />
 
       <div className="space-y-5">
         <div>

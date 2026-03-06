@@ -138,3 +138,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   return NextResponse.json({ error: 'No setting provided' }, { status: 400 })
 }
+
+export async function DELETE(request: NextRequest): Promise<NextResponse> {
+  let body: { key?: string } = {}
+  try {
+    body = await request.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
+  }
+
+  const allowed = ['anthropicApiKey', 'openaiApiKey']
+  if (!body.key || !allowed.includes(body.key)) {
+    return NextResponse.json({ error: 'Invalid key' }, { status: 400 })
+  }
+
+  await prisma.setting.deleteMany({ where: { key: body.key } })
+  return NextResponse.json({ deleted: true })
+}
