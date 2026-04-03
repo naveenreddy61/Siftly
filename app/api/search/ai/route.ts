@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
-import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
 import { ftsSearch } from '@/lib/fts'
-import { resolveAnthropicClient } from '@/lib/claude-cli-auth'
-import { getAnthropicModel } from '@/lib/settings'
 import { extractKeywords } from '@/lib/search-utils'
+import { getGeminiClient, getGeminiModel } from '@/lib/gemini-client'
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
 interface CacheEntry { results: unknown; expiresAt: number }
@@ -28,10 +26,10 @@ let _apiKeyExpiry = 0
 let _categoriesCache: { slug: string; name: string; description: string | null }[] | null = null
 let _categoriesCacheExpiry = 0
 
-async function getDbApiKey(): Promise<string> {
+async function getDbApiKey(): Promise<string | null> {
   if (_apiKey !== null && Date.now() < _apiKeyExpiry) return _apiKey
-  const setting = await prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } })
-  const fromDb = setting?.value?.trim() ?? ''
+  const setting = await prisma.setting.findUnique({ where: { key: 'geminiApiKey' } })
+  const fromDb = setting?.value?.trim() ?? null
   _apiKey = fromDb
   _apiKeyExpiry = Date.now() + 60_000
   return _apiKey
@@ -190,19 +188,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const { query, category } = body
   if (!query?.trim()) return NextResponse.json({ error: 'Query required' }, { status: 400 })
 
-  const apiKey = await getDbApiKey()
+  // Get Gemini client
+  const geminiModelClient = await getGeminiClient()
+  
+  if (!geminiModelClient) {
+    return NextResponse.json({ error: 'No Gemini API key configured. Add your key in Settings.' }, { status: 400 })
+  }
 
   const cacheKey = `${query.trim().toLowerCase()}::${category ?? ''}`
   const cached = getCached(cacheKey)
   if (cached) return NextResponse.json(cached)
-
-  let client: Anthropic
-  try {
-    client = resolveAnthropicClient({ dbKey: apiKey })
-  } catch {
-    return NextResponse.json({ error: 'No Anthropic API key configured. Add it in Settings or log in with Claude CLI.' }, { status: 400 })
-  }
-  const model = await getAnthropicModel()
 
   const categoryFilter = category
     ? { categories: { some: { category: { slug: category } } } }
@@ -272,7 +267,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     if (!seen.has(b.id)) { seen.add(b.id); merged.push(b) }
   }
 
-  // If still very few candidates, pull a recent sample so Claude has something to work with
+  // If still very few candidates, pull a recent sample so Gemini has something to work with
   let bookmarks = merged
   if (bookmarks.length < 20) {
     const fallback = await prisma.bookmark.findMany({
@@ -340,12 +335,8 @@ Constraints:
   let aiResponse: { queryIntent?: string; matches: { id: string; score: number; reason: string }[]; explanation: string }
 
   try {
-    const msg = await client.messages.create({
-      model,
-      max_tokens: 1500,
-      messages: [{ role: 'user', content: prompt }],
-    })
-    const rawText = msg.content.find((b) => b.type === 'text')?.text ?? '{}'
+    const result = await geminiModelClient.generateContent(prompt)
+    const rawText = result.response.text() ?? '{}'
     const jsonMatch = rawText.match(/\{[\s\S]*\}/)
     aiResponse = jsonMatch
       ? (JSON.parse(jsonMatch[0]) as typeof aiResponse)

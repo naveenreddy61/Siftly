@@ -7,23 +7,21 @@ function maskKey(raw: string | null): string | null {
   return `${raw.slice(0, 6)}${'*'.repeat(raw.length - 10)}${raw.slice(-4)}`
 }
 
-const ALLOWED_ANTHROPIC_MODELS = [
-  'claude-haiku-4-5-20251001',
-  'claude-sonnet-4-6',
-  'claude-opus-4-6',
+const ALLOWED_GEMINI_MODELS = [
+  'gemini-3.1-flash-lite-preview',
 ] as const
 
 export async function GET(): Promise<NextResponse> {
   try {
-    const [anthropic, anthropicModel] = await Promise.all([
-      prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } }),
-      prisma.setting.findUnique({ where: { key: 'anthropicModel' } }),
+    const [gemini, geminiModel] = await Promise.all([
+      prisma.setting.findUnique({ where: { key: 'geminiApiKey' } }),
+      prisma.setting.findUnique({ where: { key: 'geminiModel' } }),
     ])
 
     return NextResponse.json({
-      anthropicApiKey: maskKey(anthropic?.value ?? null),
-      hasAnthropicKey: anthropic !== null,
-      anthropicModel: anthropicModel?.value ?? 'claude-opus-4-6',
+      geminiApiKey: maskKey(gemini?.value ?? null),
+      hasGeminiKey: gemini !== null,
+      geminiModel: geminiModel?.value ?? 'gemini-3.1-flash-lite-preview',
     })
   } catch (err) {
     console.error('Settings GET error:', err)
@@ -36,8 +34,8 @@ export async function GET(): Promise<NextResponse> {
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   let body: {
-    anthropicApiKey?: string
-    anthropicModel?: string
+    geminiApiKey?: string
+    geminiModel?: string
   } = {}
   try {
     body = await request.json()
@@ -45,36 +43,36 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const { anthropicApiKey, anthropicModel } = body
+  const { geminiApiKey, geminiModel } = body
 
-  // Save Anthropic model if provided
-  if (anthropicModel !== undefined) {
-    if (!(ALLOWED_ANTHROPIC_MODELS as readonly string[]).includes(anthropicModel)) {
-      return NextResponse.json({ error: 'Invalid Anthropic model' }, { status: 400 })
+  // Save Gemini model if provided
+  if (geminiModel !== undefined) {
+    if (!(ALLOWED_GEMINI_MODELS as readonly string[]).includes(geminiModel)) {
+      return NextResponse.json({ error: 'Invalid Gemini model' }, { status: 400 })
     }
     await prisma.setting.upsert({
-      where: { key: 'anthropicModel' },
-      update: { value: anthropicModel },
-      create: { key: 'anthropicModel', value: anthropicModel },
+      where: { key: 'geminiModel' },
+      update: { value: geminiModel },
+      create: { key: 'geminiModel', value: geminiModel },
     })
     return NextResponse.json({ saved: true })
   }
 
-  // Save Anthropic key if provided
-  if (anthropicApiKey !== undefined) {
-    if (typeof anthropicApiKey !== 'string' || anthropicApiKey.trim() === '') {
-      return NextResponse.json({ error: 'Invalid anthropicApiKey value' }, { status: 400 })
+  // Save Gemini key if provided
+  if (geminiApiKey !== undefined) {
+    if (typeof geminiApiKey !== 'string' || geminiApiKey.trim() === '') {
+      return NextResponse.json({ error: 'Invalid geminiApiKey value' }, { status: 400 })
     }
-    const trimmed = anthropicApiKey.trim()
+    const trimmed = geminiApiKey.trim()
     try {
       await prisma.setting.upsert({
-        where: { key: 'anthropicApiKey' },
+        where: { key: 'geminiApiKey' },
         update: { value: trimmed },
-        create: { key: 'anthropicApiKey', value: trimmed },
+        create: { key: 'geminiApiKey', value: trimmed },
       })
       return NextResponse.json({ saved: true })
     } catch (err) {
-      console.error('Settings POST (anthropic) error:', err)
+      console.error('Settings POST error:', err)
       return NextResponse.json(
         { error: `Failed to save: ${err instanceof Error ? err.message : String(err)}` },
         { status: 500 }
@@ -93,7 +91,7 @@ export async function DELETE(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 })
   }
 
-  const allowed = ['anthropicApiKey']
+  const allowed = ['geminiApiKey', 'geminiModel']
   if (!body.key || !allowed.includes(body.key)) {
     return NextResponse.json({ error: 'Invalid key' }, { status: 400 })
   }

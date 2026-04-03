@@ -1,8 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk'
+import { GenerativeModel } from '@google/generative-ai'
 import prisma from '@/lib/db'
 import { buildImageContext } from '@/lib/image-context'
-import { resolveAnthropicClient, getCliAvailability, claudePrompt, modelNameToCliAlias } from '@/lib/claude-cli-auth'
-import { getAnthropicModel } from '@/lib/settings'
+import { getGeminiModel } from '@/lib/gemini-client'
 
 const BATCH_SIZE = 20
 
@@ -209,10 +208,10 @@ ${JSON.stringify(tweetData, null, 1)}`
 
 function parseCategorizationResponse(text: string, validSlugs: Set<string>): CategorizationResult[] {
   const jsonMatch = text.match(/\[[\s\S]*\]/)
-  if (!jsonMatch) throw new Error('No JSON array found in Claude response')
+  if (!jsonMatch) throw new Error('No JSON array found in response')
 
   const parsed: unknown = JSON.parse(jsonMatch[0])
-  if (!Array.isArray(parsed)) throw new Error('Claude response is not an array')
+  if (!Array.isArray(parsed)) throw new Error('Response is not an array')
 
   return (parsed as Record<string, unknown>[]).map((item): CategorizationResult => {
     const tweetId = String(item.tweetId ?? '')
@@ -231,7 +230,7 @@ function parseCategorizationResponse(text: string, validSlugs: Set<string>): Cat
 
 export async function categorizeBatch(
   bookmarks: BookmarkForCategorization[],
-  client: Anthropic | null,
+  geminiModel: GenerativeModel,
   categoryDescriptions: Record<string, string> = {},
   allSlugs: string[] = DEFAULT_SLUGS,
 ): Promise<CategorizationResult[]> {
@@ -239,39 +238,25 @@ export async function categorizeBatch(
 
   const prompt = buildCategorizationPrompt(bookmarks, categoryDescriptions, allSlugs)
 
-  // Prefer CLI over SDK (avoids OAuth token extraction, uses CLI directly)
-  if (await getCliAvailability()) {
-    const modelSetting = await getAnthropicModel()
-    const cliModel = modelNameToCliAlias(modelSetting)
-
-    const result = await claudePrompt(prompt, { model: cliModel, timeoutMs: 60_000 })
-    if (result.success && result.data) {
+  const CATEGORIZE_RETRY_DELAYS = [2000, 5000]
+  for (let attempt = 0; attempt <= CATEGORIZE_RETRY_DELAYS.length; attempt++) {
+    try {
+      const result = await geminiModel.generateContent(prompt)
+      const text = result.response.text() ?? ''
       try {
-        return parseCategorizationResponse(result.data, new Set(allSlugs))
+        return parseCategorizationResponse(text, new Set(allSlugs))
       } catch (parseErr) {
-        console.warn('[categorize] CLI response parse failed, falling back to SDK:', parseErr)
+        console.warn('[categorize] Gemini response parse failed:', parseErr)
       }
-    } else {
-      console.warn('[categorize] CLI failed, falling back to SDK:', result.error)
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err)
+      console.warn(`[categorize] Gemini batch failed (attempt ${attempt + 1}): ${errMsg.slice(0, 120)}`)
+      const isClientError = errMsg.includes('400') || errMsg.includes('401') || errMsg.includes('403') || errMsg.includes('422')
+      if (isClientError || attempt >= CATEGORIZE_RETRY_DELAYS.length) break
+      await new Promise((r) => setTimeout(r, CATEGORIZE_RETRY_DELAYS[attempt]))
     }
   }
-
-  // Fallback to SDK (requires API key)
-  if (!client) {
-    throw new Error('Claude CLI not available and no API key configured.')
-  }
-
-  const model = await getAnthropicModel()
-  const message = await client.messages.create({
-    model,
-    max_tokens: 2048,
-    messages: [{ role: 'user', content: prompt }],
-  })
-
-  const textBlock = message.content.find((b) => b.type === 'text')
-  if (!textBlock || textBlock.type !== 'text') throw new Error('No text content in Claude response')
-
-  return parseCategorizationResponse(textBlock.text, new Set(allSlugs))
+  return []
 }
 
 export async function writeCategoryResults(results: CategorizationResult[]): Promise<void> {
@@ -381,9 +366,12 @@ export async function categorizeAll(
 ): Promise<void> {
   await seedDefaultCategories()
 
-  // Resolve auth once — avoids re-resolving inside every batch call
-  const apiKeySetting = await prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } })
-  const client = resolveAnthropicClient({ dbKey: apiKeySetting?.value })
+  // Get Gemini client
+  const geminiModel = await getGeminiClient()
+  if (!geminiModel) {
+    console.error('[categorize] No Gemini API key configured')
+    return
+  }
 
   // Load ALL categories (default + custom) for the prompt
   const dbCategories = await prisma.category.findMany({ select: { slug: true, name: true, description: true } })
@@ -415,7 +403,7 @@ export async function categorizeAll(
       })
       const batch = rows.map(mapBookmarkForCategorization)
       try {
-        const results = await categorizeBatch(batch, client, categoryDescriptions, allSlugs)
+        const results = await categorizeBatch(batch, geminiModel, categoryDescriptions, allSlugs)
         await writeCategoryResults(results)
       } catch (err) {
         console.error(`Error categorizing batch at index ${i}:`, err)
@@ -443,7 +431,7 @@ export async function categorizeAll(
 
       const batch = rows.map(mapBookmarkForCategorization)
       try {
-        const results = await categorizeBatch(batch, client, categoryDescriptions, allSlugs)
+        const results = await categorizeBatch(batch, geminiModel, categoryDescriptions, allSlugs)
         await writeCategoryResults(results)
       } catch (err) {
         console.error('Error categorizing batch:', err)

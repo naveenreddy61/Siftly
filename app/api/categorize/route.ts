@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
-import { resolveAnthropicClient } from '@/lib/claude-cli-auth'
 import {
   seedDefaultCategories,
   categorizeBatch,
@@ -10,7 +8,6 @@ import {
   BOOKMARK_SELECT,
 } from '@/lib/categorizer'
 import {
-  getAnthropicModel,
   analyzeItem,
   runWithConcurrency,
   enrichBatchSemanticTags,
@@ -18,6 +15,7 @@ import {
 } from '@/lib/vision-analyzer'
 import { backfillEntities } from '@/lib/rawjson-extractor'
 import { rebuildFts } from '@/lib/fts'
+import { getGeminiClient, getGeminiModel } from '@/lib/gemini-client'
 
 type Stage = 'vision' | 'entities' | 'enrichment' | 'categorize' | 'parallel'
 
@@ -110,14 +108,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const { bookmarkIds = [], apiKey, force = false } = body
 
-  if (apiKey && typeof apiKey === 'string' && apiKey.trim() !== '') {
-    await prisma.setting.upsert({
-      where: { key: 'anthropicApiKey' },
-      update: { value: apiKey.trim() },
-      create: { key: 'anthropicApiKey', value: apiKey.trim() },
-    })
-  }
-
   globalState.categorizationAbort = false
 
   let total = 0
@@ -143,19 +133,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     error: null,
   })
 
-  const dbApiKey =
-    (await prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } }))?.value?.trim() || ''
-
   void (async () => {
     const counts = { visionTagged: 0, entitiesExtracted: 0, enriched: 0, categorized: 0 }
 
     try {
-      let client: Anthropic
-      try {
-        client = resolveAnthropicClient({ dbKey: dbApiKey })
-      } catch {
-        setState({ lastError: 'No Anthropic API key configured. Go to Settings to add one, or log in with Claude CLI.' })
-        console.error('No API key or CLI auth — skipping pipeline')
+      // Get Gemini client (only supported provider)
+      const geminiModel = await getGeminiClient()
+      
+      if (!geminiModel) {
+        setState({ lastError: 'No Gemini API key configured. Go to Settings to add your key.' })
+        console.error('No Gemini API key — skipping pipeline')
         return
       }
 
@@ -208,7 +195,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           const categoryDescriptions = Object.fromEntries(
             dbCategories.map((c) => [c.slug, c.description?.trim() || c.name]),
           )
-          const model = await getAnthropicModel()
+          const model = await getGeminiModel()
 
           // Shared categorization queue (JS single-threaded: splice is atomic vs async)
           const catPending: string[] = []
@@ -236,7 +223,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
                 })
                 const batch = rows.map(mapBookmarkForCategorization)
                 try {
-                  const results = await categorizeBatch(batch, client, categoryDescriptions, allSlugs)
+                  const results = await categorizeBatch(batch, geminiModel, categoryDescriptions, allSlugs)
                   await writeCategoryResults(results)
                   counts.categorized += ids.length
                   setState({ stageCounts: { ...counts } })
@@ -277,8 +264,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
               try {
                 await analyzeItem(
                   { id: media.id, url: media.url, thumbnailUrl: media.thumbnailUrl, type: media.type },
-                  client,
-                  model,
+                  geminiModel,
                 )
                 anyVisionRan = true
                 counts.visionTagged++
@@ -317,7 +303,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
                 try {
                   const results = await enrichBatchSemanticTags(
                     [{ id: bm.id, text: bm.text, imageTags, entities }],
-                    client,
+                    geminiModel,
                   )
                   const result = results[0]
                   if (result?.tags.length) {

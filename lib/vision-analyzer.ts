@@ -1,10 +1,7 @@
-import Anthropic from '@anthropic-ai/sdk'
+import { GoogleGenerativeAI, GenerativeModel } from '@google/generative-ai'
 import prisma from '@/lib/db'
 import { buildImageContext } from '@/lib/image-context'
-import { getCliAvailability, claudePrompt, modelNameToCliAlias } from '@/lib/claude-cli-auth'
-import { getAnthropicModel } from '@/lib/settings'
-
-export { getAnthropicModel } from '@/lib/settings'
+import { getGeminiClient, getGeminiModel } from '@/lib/gemini-client'
 
 type AllowedMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
 
@@ -16,11 +13,9 @@ function guessMediaType(url: string, contentTypeHeader: string | null): AllowedM
   return 'image/jpeg'
 }
 
-const MAX_IMAGE_BYTES = 3_500_000 // 3.5MB raw → ~4.7MB base64, under Claude's 5MB limit
+const MAX_IMAGE_BYTES = 3_500_000 // 3.5MB raw
 
-async function fetchImageAsBase64(
-  url: string,
-): Promise<{ data: string; mediaType: AllowedMediaType } | null> {
+async function fetchImageAsArrayBuffer(url: string): Promise<ArrayBuffer | null> {
   try {
     const res = await fetch(url, {
       headers: {
@@ -31,13 +26,12 @@ async function fetchImageAsBase64(
     })
     if (!res.ok) return null
     const buffer = await res.arrayBuffer()
-    if (buffer.byteLength < 500) return null // skip tiny/broken responses
+    if (buffer.byteLength < 500) return null
     if (buffer.byteLength > MAX_IMAGE_BYTES) {
       console.warn(`[vision] skipping oversized image (${Math.round(buffer.byteLength / 1024)}KB): ${url.slice(0, 80)}`)
       return null
     }
-    const mediaType = guessMediaType(url, res.headers.get('content-type'))
-    return { data: Buffer.from(buffer).toString('base64'), mediaType }
+    return buffer
   } catch {
     return null
   }
@@ -71,61 +65,41 @@ const CONCURRENCY = 12
 
 async function analyzeImageWithRetry(
   url: string,
-  client: Anthropic,
-  model: string,
+  model: GenerativeModel,
   attempt = 0,
 ): Promise<string> {
-  const img = await fetchImageAsBase64(url)
+  const img = await fetchImageAsArrayBuffer(url)
   if (!img) return ''
 
   try {
-    const msg = await client.messages.create({
-      model,
-      max_tokens: 700,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } },
-            { type: 'text', text: ANALYSIS_PROMPT },
-          ],
+    const result = await model.generateContent([
+      {
+        inlineData: {
+          mimeType: 'image/jpeg',
+          data: Buffer.from(img).toString('base64'),
         },
-      ],
-    })
-    const raw = msg.content.find((b) => b.type === 'text')?.text?.trim() ?? ''
+      },
+      ANALYSIS_PROMPT,
+    ])
+    const raw = result.response.text()?.trim() ?? ''
     if (!raw) return ''
 
-    // Validate it's parseable JSON
     const jsonMatch = raw.match(/\{[\s\S]*\}/)
     if (!jsonMatch) return ''
-    JSON.parse(jsonMatch[0]) // throws if invalid
+    JSON.parse(jsonMatch[0])
     return jsonMatch[0]
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    // Never retry client errors (4xx) — bad request, invalid image, too large, etc.
     const isClientError = msg.includes('400') || msg.includes('401') || msg.includes('403') || msg.includes('422')
-    const isRetryable =
-      !isClientError && (
-        msg.includes('rate') ||
-        msg.includes('529') ||
-        msg.includes('overloaded') ||
-        msg.includes('ECONNREFUSED') ||
-        msg.includes('ETIMEDOUT') ||
-        msg.includes('fetch') ||
-        msg.includes('network') ||
-        msg.includes('500') ||
-        msg.includes('502') ||
-        msg.includes('503')
-      )
+    const isRetryable = !isClientError
 
     if (attempt === 0) {
-      // Log first failure per item so server console shows what's wrong
-      console.warn(`[vision] analysis failed (attempt ${attempt + 1}): ${msg.slice(0, 120)}`)
+      console.warn(`[vision] Gemini analysis failed (attempt ${attempt + 1}): ${msg.slice(0, 400)}`)
     }
 
     if (isRetryable && attempt < RETRY_DELAYS_MS.length) {
       await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[attempt]))
-      return analyzeImageWithRetry(url, client, model, attempt + 1)
+      return analyzeImageWithRetry(url, model, attempt + 1)
     }
     return ''
   }
@@ -138,10 +112,6 @@ export interface MediaItemForAnalysis {
   type: string
 }
 
-/**
- * Check if this URL's analysis result is already cached in another MediaItem row.
- * Deduplicates API calls for the same image URL.
- */
 async function getCachedAnalysis(imageUrl: string, excludeId: string): Promise<string | null> {
   const existing = await prisma.mediaItem.findFirst({
     where: { url: imageUrl, imageTags: { not: null }, id: { not: excludeId } },
@@ -152,12 +122,10 @@ async function getCachedAnalysis(imageUrl: string, excludeId: string): Promise<s
 
 export async function analyzeItem(
   item: MediaItemForAnalysis,
-  client: Anthropic,
-  model: string,
+  geminiModel: GenerativeModel,
 ): Promise<number> {
   const imageUrl = item.type === 'video' ? (item.thumbnailUrl ?? item.url) : item.url
 
-  // Check URL-level dedup cache first
   const cached = await getCachedAnalysis(imageUrl, item.id)
   if (cached) {
     await prisma.mediaItem.update({ where: { id: item.id }, data: { imageTags: cached } })
@@ -165,10 +133,9 @@ export async function analyzeItem(
   }
 
   const prefix = item.type === 'video' ? '{"_type":"video_thumbnail",' : ''
-  let tags = await analyzeImageWithRetry(imageUrl, client, model)
+  let tags = await analyzeImageWithRetry(imageUrl, geminiModel)
 
   if (tags && prefix) {
-    // Inject a _type marker into the JSON for video thumbnails
     tags = tags.replace(/^\{/, prefix)
   }
 
@@ -177,8 +144,6 @@ export async function analyzeItem(
     return 1
   }
 
-  // CRITICAL: Mark as attempted even on failure. Without this, the while loop in
-  // analyzeAllUntagged re-fetches the same items forever (infinite loop).
   await prisma.mediaItem.update({ where: { id: item.id }, data: { imageTags: '{}' } })
   return 0
 }
@@ -204,18 +169,16 @@ export async function runWithConcurrency<T>(
 
 export async function analyzeBatch(
   items: MediaItemForAnalysis[],
-  client: Anthropic,
+  geminiModel: GenerativeModel,
   onProgress?: (delta: number) => void,
   shouldAbort?: () => boolean,
 ): Promise<number> {
   const analyzable = items.filter((m) => m.type === 'photo' || m.type === 'gif' || m.type === 'video')
   if (analyzable.length === 0) return 0
 
-  const model = await getAnthropicModel()
-
   const tasks = analyzable.map((item) => async () => {
     if (shouldAbort?.()) return 0
-    const result = await analyzeItem(item, client, model)
+    const result = await analyzeItem(item, geminiModel)
     onProgress?.(1)
     return result
   })
@@ -224,21 +187,21 @@ export async function analyzeBatch(
   return results.reduce((sum, r) => sum + r, 0)
 }
 
-export async function analyzeUntaggedImages(client: Anthropic, limit = 10): Promise<number> {
+export async function analyzeUntaggedImages(
+  geminiModel: GenerativeModel,
+  limit = 10,
+): Promise<number> {
   const untagged = await prisma.mediaItem.findMany({
     where: { imageTags: null, type: { in: ['photo', 'gif', 'video'] } },
     take: limit,
     select: { id: true, url: true, thumbnailUrl: true, type: true },
   })
   if (untagged.length === 0) return 0
-  return analyzeBatch(untagged, client)
+  return analyzeBatch(untagged, geminiModel)
 }
 
-/**
- * Analyze ALL untagged media items (no limit). Used during full AI categorization.
- */
 export async function analyzeAllUntagged(
-  client: Anthropic,
+  geminiModel: GenerativeModel,
   onProgress?: (total: number) => void,
   shouldAbort?: () => boolean,
 ): Promise<number> {
@@ -249,12 +212,9 @@ export async function analyzeAllUntagged(
   while (true) {
     if (shouldAbort?.()) break
 
-    // Use cursor-based pagination so failed items (marked '{}') are skipped naturally,
-    // and we never re-fetch items we already attempted this run.
     const untagged = await prisma.mediaItem.findMany({
       where: {
         type: { in: ['photo', 'gif', 'video'] },
-        // Only fetch items that have never been attempted (null) — '{}' sentinel means already tried
         imageTags: null,
         ...(cursor ? { id: { gt: cursor } } : {}),
       },
@@ -267,7 +227,7 @@ export async function analyzeAllUntagged(
 
     cursor = untagged[untagged.length - 1].id
 
-    await analyzeBatch(untagged, client, (delta) => {
+    await analyzeBatch(untagged, geminiModel, (delta) => {
       total += delta
       onProgress?.(total)
     }, shouldAbort)
@@ -286,7 +246,7 @@ const ENRICH_CONCURRENCY = 2
 export interface BookmarkForEnrichment {
   id: string
   text: string
-  imageTags: string[] // filtered, non-empty
+  imageTags: string[]
   entities?: {
     hashtags?: string[]
     urls?: string[]
@@ -338,13 +298,12 @@ ${JSON.stringify(items, null, 1)}`
 
 export async function enrichBatchSemanticTags(
   bookmarks: BookmarkForEnrichment[],
-  client: Anthropic | null,
+  geminiModel: GenerativeModel,
 ): Promise<EnrichmentResult[]> {
   if (bookmarks.length === 0) return []
 
   const prompt = buildEnrichmentPrompt(bookmarks)
 
-  // Helper to parse enrichment response
   const parseResponse = (text: string): EnrichmentResult[] => {
     const match = text.match(/\[[\s\S]*\]/)
     if (!match) return []
@@ -359,44 +318,17 @@ export async function enrichBatchSemanticTags(
     })).filter((r) => r.id)
   }
 
-  // Prefer CLI over SDK
-  if (await getCliAvailability()) {
-    const modelSetting = await getAnthropicModel()
-    const cliModel = modelNameToCliAlias(modelSetting)
-
-    const result = await claudePrompt(prompt, { model: cliModel, timeoutMs: 90_000 })
-    if (result.success && result.data) {
-      try {
-        return parseResponse(result.data)
-      } catch {
-        console.warn('[enrich] CLI response parse failed, falling back to SDK')
-      }
-    }
-  }
-
-  // Fallback to SDK
-  if (!client) {
-    console.warn('[enrich] CLI not available and no API client')
-    return []
-  }
-
-  const model = await getAnthropicModel()
   const ENRICH_RETRY_DELAYS = [2000, 5000]
-
   for (let attempt = 0; attempt <= ENRICH_RETRY_DELAYS.length; attempt++) {
     try {
-      const msg = await client.messages.create({
-        model,
-        max_tokens: 4096,
-        messages: [{ role: 'user', content: prompt }],
-      })
-      const text = msg.content.find((b) => b.type === 'text')?.text ?? ''
+      const result = await geminiModel.generateContent(prompt)
+      const text = result.response.text() ?? ''
       const results = parseResponse(text)
       if (results.length > 0) return results
-      console.warn(`[enrich] no JSON array in response (attempt ${attempt + 1})`)
+      console.warn(`[enrich] Gemini no JSON array in response (attempt ${attempt + 1})`)
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err)
-      console.warn(`[enrich] batch failed (attempt ${attempt + 1}): ${errMsg.slice(0, 120)}`)
+      console.warn(`[enrich] Gemini batch failed (attempt ${attempt + 1}): ${errMsg.slice(0, 400)}`)
       const isClientError = errMsg.includes('400') || errMsg.includes('401') || errMsg.includes('403') || errMsg.includes('422')
       if (isClientError || attempt >= ENRICH_RETRY_DELAYS.length) break
       await new Promise((r) => setTimeout(r, ENRICH_RETRY_DELAYS[attempt]))
@@ -405,17 +337,12 @@ export async function enrichBatchSemanticTags(
   return []
 }
 
-/**
- * Run semantic enrichment for all bookmarks that have no semanticTags yet.
- * Processes bookmarks in batches of ENRICH_BATCH_SIZE (one API call per batch)
- * with ENRICH_CONCURRENCY parallel batches — 5-10x fewer API calls vs. per-bookmark.
- */
 export async function enrichAllBookmarks(
-  client: Anthropic,
+  geminiModel: GenerativeModel,
   onProgress?: (total: number) => void,
   shouldAbort?: () => boolean,
 ): Promise<number> {
-  const CHUNK = ENRICH_BATCH_SIZE * ENRICH_CONCURRENCY * 2 // fetch ahead of processing
+  const CHUNK = ENRICH_BATCH_SIZE * ENRICH_CONCURRENCY * 2
   let enriched = 0
   let cursor: string | undefined
 
@@ -440,7 +367,6 @@ export async function enrichAllBookmarks(
     if (rows.length === 0) break
     cursor = rows[rows.length - 1].id
 
-    // Separate bookmarks worth enriching from trivial ones (mark trivial immediately)
     const trivialIds: string[] = []
     const toEnrich: BookmarkForEnrichment[] = []
 
@@ -462,7 +388,6 @@ export async function enrichAllBookmarks(
       toEnrich.push({ id: b.id, text: b.text, imageTags, entities })
     }
 
-    // Mark trivial bookmarks in one batch
     if (trivialIds.length > 0) {
       await prisma.bookmark.updateMany({
         where: { id: { in: trivialIds } },
@@ -470,7 +395,6 @@ export async function enrichAllBookmarks(
       })
     }
 
-    // Split into batches and process with concurrency
     const batches: BookmarkForEnrichment[][] = []
     for (let i = 0; i < toEnrich.length; i += ENRICH_BATCH_SIZE) {
       batches.push(toEnrich.slice(i, i + ENRICH_BATCH_SIZE))
@@ -479,7 +403,7 @@ export async function enrichAllBookmarks(
     const batchTasks = batches.map((batch) => async () => {
       if (shouldAbort?.()) return
 
-      const results = await enrichBatchSemanticTags(batch, client)
+      const results = await enrichBatchSemanticTags(batch, geminiModel)
       const resultMap = new Map(results.map((r) => [r.id, r]))
 
       for (const b of batch) {
@@ -499,8 +423,6 @@ export async function enrichAllBookmarks(
           enriched++
           onProgress?.(enriched)
         }
-        // Don't mark failed enrichments as '[]' — leave semanticTags: null so
-        // they are retried on the next pipeline run without needing force=true.
       }
     })
 
@@ -512,20 +434,16 @@ export async function enrichAllBookmarks(
   return enriched
 }
 
-/**
- * Generate semantic tags for a single bookmark (used for on-demand re-enrichment).
- * For bulk processing use enrichAllBookmarks instead.
- */
 export async function enrichBookmarkSemanticTags(
   bookmarkId: string,
   tweetText: string,
   imageTags: string[],
-  client: Anthropic,
+  geminiModel: GenerativeModel,
   entities?: BookmarkForEnrichment['entities'],
 ): Promise<string[]> {
   const results = await enrichBatchSemanticTags(
     [{ id: bookmarkId, text: tweetText, imageTags, entities }],
-    client,
+    geminiModel,
   )
   const result = results[0]
   if (!result?.tags.length) return []

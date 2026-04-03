@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
 import { analyzeBatch } from '@/lib/vision-analyzer'
-import { resolveAnthropicClient } from '@/lib/claude-cli-auth'
+import { getGeminiClient } from '@/lib/gemini-client'
 
 // GET: returns progress stats
 export async function GET(): Promise<NextResponse> {
@@ -23,20 +22,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     // use default
   }
 
-  const setting = await prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } })
-  const dbKey = setting?.value?.trim()
-
-  let client
-  try {
-    client = resolveAnthropicClient({ dbKey })
-  } catch {
-    return NextResponse.json({ error: 'No API key configured. Add your key in Settings or sign in to Claude CLI.' }, { status: 400 })
+  // Get Gemini client (only supported provider)
+  const geminiModel = await getGeminiClient()
+  
+  if (!geminiModel) {
+    return NextResponse.json({ error: 'No Gemini API key configured. Add your key in Settings.' }, { status: 400 })
   }
 
-  return runAnalysis(client, batchSize)
+  return runAnalysis(geminiModel, batchSize)
 }
 
-async function runAnalysis(client: Anthropic, batchSize: number): Promise<NextResponse> {
+async function runAnalysis(
+  geminiModel: ReturnType<typeof getGeminiClient> extends Promise<infer T> ? T : never,
+  batchSize: number,
+): Promise<NextResponse> {
   const untagged = await prisma.mediaItem.findMany({
     where: { imageTags: null, type: { in: ['photo', 'gif'] } },
     take: batchSize,
@@ -47,7 +46,7 @@ async function runAnalysis(client: Anthropic, batchSize: number): Promise<NextRe
     return NextResponse.json({ analyzed: 0, remaining: 0, message: 'All images already analyzed.' })
   }
 
-  const analyzed = await analyzeBatch(untagged, client)
+  const analyzed = await analyzeBatch(untagged, null, geminiModel)
 
   const remaining = await prisma.mediaItem.count({
     where: { imageTags: null, type: { in: ['photo', 'gif'] } },
