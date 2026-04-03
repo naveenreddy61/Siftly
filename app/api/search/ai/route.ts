@@ -1,11 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
 import { ftsSearch } from '@/lib/fts'
-import { AIClient, resolveAIClient } from '@/lib/ai-client'
-import { getActiveModel, getProvider } from '@/lib/settings'
 import { extractKeywords } from '@/lib/search-utils'
-import { getCliAvailability, claudePrompt, modelNameToCliAlias } from '@/lib/claude-cli-auth'
-import { getCodexCliAvailability, codexPrompt } from '@/lib/codex-cli'
+import { getGeminiClient } from '@/lib/gemini-client'
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
 interface CacheEntry { results: unknown; expiresAt: number }
@@ -24,21 +21,9 @@ function setCache(key: string, results: unknown): void {
 }
 
 // ─── Module-level caches (avoid DB roundtrips on every search) ────────────────
-let _apiKey: string | null = null
-let _apiKeyExpiry = 0
 let _categoriesCache: { slug: string; name: string; description: string | null }[] | null = null
 let _categoriesCacheExpiry = 0
 
-async function getDbApiKey(): Promise<string> {
-  if (_apiKey !== null && Date.now() < _apiKeyExpiry) return _apiKey
-  const provider = await getProvider()
-  const keyName = provider === 'openai' ? 'openaiApiKey' : 'anthropicApiKey'
-  const setting = await prisma.setting.findUnique({ where: { key: keyName } })
-  const fromDb = setting?.value?.trim() ?? ''
-  _apiKey = fromDb
-  _apiKeyExpiry = Date.now() + 60_000
-  return _apiKey
-}
 async function getAllCategories() {
   if (_categoriesCache && Date.now() < _categoriesCacheExpiry) return _categoriesCache
   _categoriesCache = await prisma.category.findMany({ select: { slug: true, name: true, description: true } })
@@ -120,10 +105,8 @@ function buildIndexEntry(b: {
 }): string {
   const lines: string[] = [`[${b.id}]`]
 
-  // Text — more generous limit for complex queries
   lines.push(`text: ${b.text.slice(0, 350)}`)
 
-  // Image/media context — rich structured data
   for (const m of b.mediaItems) {
     if (!m.imageTags || m.imageTags === '{}') {
       lines.push(`media: [${m.type}]`)
@@ -151,7 +134,6 @@ function buildIndexEntry(b: {
     }
   }
 
-  // AI semantic tags — full set
   if (b.semanticTags && b.semanticTags !== '[]') {
     try {
       const tags = JSON.parse(b.semanticTags) as string[]
@@ -159,7 +141,6 @@ function buildIndexEntry(b: {
     } catch { /* ignore */ }
   }
 
-  // Hashtags + tool mentions
   if (b.entities) {
     try {
       const ent = JSON.parse(b.entities) as { hashtags?: string[]; tools?: string[]; mentions?: string[] }
@@ -171,7 +152,6 @@ function buildIndexEntry(b: {
     } catch { /* ignore */ }
   }
 
-  // Categories with confidence
   if (b.categories.length) {
     const cats = b.categories
       .filter((c) => c.confidence >= 0.5)
@@ -193,20 +173,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const { query, category } = body
   if (!query?.trim()) return NextResponse.json({ error: 'Query required' }, { status: 400 })
 
-  const apiKey = await getDbApiKey()
+  // Get Gemini client
+  const geminiModelClient = await getGeminiClient()
+
+  if (!geminiModelClient) {
+    return NextResponse.json({ error: 'No Gemini API key configured. Add your key in Settings.' }, { status: 400 })
+  }
 
   const cacheKey = `${query.trim().toLowerCase()}::${category ?? ''}`
   const cached = getCached(cacheKey)
   if (cached) return NextResponse.json(cached)
-
-  let client: AIClient | null = null
-  try {
-    client = await resolveAIClient({ dbKey: apiKey })
-  } catch {
-    // SDK not available — will try CLI path
-  }
-  const model = await getActiveModel()
-  const provider = await getProvider()
 
   const categoryFilter = category
     ? { categories: { some: { category: { slug: category } } } }
@@ -215,7 +191,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // ── Step 1: Smart candidate selection ─────────────────────────────────────
   const keywords = extractKeywords(query)
   const intentSlugs = category ? [] : await detectIntentCategories(query)
-  const MAX_CANDIDATES = 150 // smaller, richer set beats larger, noisier set
+  const MAX_CANDIDATES = 150
 
   const selectShape = {
     id: true, tweetId: true, text: true, authorHandle: true, authorName: true,
@@ -227,11 +203,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     },
   } as const
 
-  // Try FTS5 first (fast, ranked by relevance); fall back to LIKE on error/empty
   const ftsIds = keywords.length > 0 ? await ftsSearch(keywords) : []
   const useFts = ftsIds.length > 0
 
-  // Build LIKE-based fallback conditions (used when FTS5 is empty/unavailable)
   const keywordConditions = keywords.flatMap((kw) => [
     { text: { contains: kw } },
     { semanticTags: { contains: kw } },
@@ -239,7 +213,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     { mediaItems: { some: { imageTags: { contains: kw } } } },
   ])
 
-  // Run keyword-filtered and category-intent queries in parallel
   const [keywordHits, intentHits] = await Promise.all([
     keywords.length > 0
       ? prisma.bookmark.findMany({
@@ -249,7 +222,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
               ? { id: { in: ftsIds } }
               : { OR: keywordConditions }),
           },
-          // FTS results are pre-ranked; LIKE results fall back to recency ordering
           orderBy: useFts ? undefined : [{ enrichedAt: 'desc' }, { tweetCreatedAt: 'desc' }],
           take: MAX_CANDIDATES,
           select: selectShape,
@@ -269,14 +241,12 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       : prisma.bookmark.findMany({ where: { id: 'never' }, select: selectShape }),
   ])
 
-  // Merge: keyword hits first (more specific), then intent hits, dedup by id
   const seen = new Set<string>()
   const merged: typeof keywordHits = []
   for (const b of [...keywordHits, ...intentHits]) {
     if (!seen.has(b.id)) { seen.add(b.id); merged.push(b) }
   }
 
-  // If still very few candidates, pull a recent sample so Claude has something to work with
   let bookmarks = merged
   if (bookmarks.length < 20) {
     const fallback = await prisma.bookmark.findMany({
@@ -289,7 +259,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     for (const b of fallback) {
       if (!fallbackSeen.has(b.id)) { fallbackSeen.add(b.id); bookmarks.push(b) }
     }
-    // Cap total
     bookmarks = bookmarks.slice(0, MAX_CANDIDATES)
   }
 
@@ -300,7 +269,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // ── Step 2: Build rich search index ───────────────────────────────────────
   const indexEntries = bookmarks.map(buildIndexEntry)
 
-  // ── Step 3: Compose a better prompt ───────────────────────────────────────
+  // ── Step 3: Compose prompt and call Gemini ────────────────────────────────
   const prompt = `You are an expert semantic search engine for a personal Twitter/X bookmark knowledge base. Find bookmarks that genuinely match what the user wants — even when exact words don't appear.
 
 USER QUERY: "${query}"
@@ -343,51 +312,19 @@ Constraints:
 
   let aiResponse: { queryIntent?: string; matches: { id: string; score: number; reason: string }[]; explanation: string } = { matches: [], explanation: 'No results found.' }
 
-  const parseSearchResponse = (rawText: string): typeof aiResponse => {
+  try {
+    const result = await geminiModelClient.generateContent(prompt)
+    const rawText = result.response.text() ?? '{}'
     const jsonMatch = rawText.match(/\{[\s\S]*\}/)
-    return jsonMatch
-      ? (JSON.parse(jsonMatch[0]) as typeof aiResponse)
-      : { matches: [], explanation: 'No results found.' }
-  }
-
-  // Try CLI first (works with ChatGPT OAuth), then fall back to SDK
-  let cliSucceeded = false
-  if (provider === 'openai' && await getCodexCliAvailability()) {
-    try {
-      const result = await codexPrompt(prompt, { timeoutMs: 90_000 })
-      if (result.success && result.data) {
-        aiResponse = parseSearchResponse(result.data)
-        cliSucceeded = true
-      }
-    } catch { /* fall through to SDK */ }
-  } else if (provider === 'anthropic' && await getCliAvailability()) {
-    try {
-      const cliModel = modelNameToCliAlias(model)
-      const result = await claudePrompt(prompt, { model: cliModel, timeoutMs: 90_000 })
-      if (result.success && result.data) {
-        aiResponse = parseSearchResponse(result.data)
-        cliSucceeded = true
-      }
-    } catch { /* fall through to SDK */ }
-  }
-
-  if (!cliSucceeded) {
-    if (!client) {
-      return NextResponse.json({ error: 'No CLI available and no API key configured. Add an API key in Settings or install Codex/Claude CLI.' }, { status: 400 })
+    if (jsonMatch) {
+      try {
+        aiResponse = JSON.parse(jsonMatch[0]) as typeof aiResponse
+      } catch { /* ignore parse error */ }
     }
-    try {
-      const response = await client.createMessage({
-        model,
-        max_tokens: 1500,
-        messages: [{ role: 'user', content: prompt }],
-      })
-      const rawText = response.text ?? '{}'
-      aiResponse = parseSearchResponse(rawText)
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err)
-      console.error('AI search error:', errMsg)
-      return NextResponse.json({ error: `AI search failed: ${errMsg}` }, { status: 500 })
-    }
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err)
+    console.error('AI search error:', errMsg)
+    return NextResponse.json({ error: `AI search failed: ${errMsg}` }, { status: 500 })
   }
 
   // ── Step 4: Hydrate results ────────────────────────────────────────────────

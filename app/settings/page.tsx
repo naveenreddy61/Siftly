@@ -17,32 +17,18 @@ import {
   Zap,
   Copy,
   Coffee,
-  Terminal,
   Loader2,
   X,
 } from 'lucide-react'
 
-const ANTHROPIC_MODELS = [
-  { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', description: 'Fast & Cheap' },
-  { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6', description: 'Smart & Balanced' },
-  { value: 'claude-opus-4-6', label: 'Opus 4.6', description: 'Most Capable' },
+const GEMINI_MODELS = [
+  { value: 'gemini-3.1-flash-lite-preview', label: 'Gemini 3.1 Flash Lite Preview', description: 'Lightweight Preview' },
 ]
-
-const OPENAI_MODELS = [
-  { value: 'gpt-4.1-mini', label: 'GPT-4.1 Mini', description: 'Fast & Cheap' },
-  { value: 'gpt-4.1', label: 'GPT-4.1', description: 'Most Capable' },
-  { value: 'gpt-4.1-nano', label: 'GPT-4.1 Nano', description: 'Fastest' },
-  { value: 'o4-mini', label: 'o4-mini', description: 'Reasoning (mini)' },
-  { value: 'o3', label: 'o3', description: 'Reasoning' },
-]
-
 
 interface Toast {
   type: 'success' | 'error'
   message: string
-}
-
-function ToastAlert({ toast }: { toast: Toast }) {
+}function ToastAlert({ toast }: { toast: Toast }) {
   return (
     <div
       className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium border ${
@@ -106,7 +92,7 @@ function ApiKeyField({
 }: {
   label: string
   placeholder: string
-  fieldKey: 'anthropicApiKey' | 'openaiApiKey'
+  fieldKey: 'geminiApiKey'
   hint: string
   docHref: string
   onToast: (t: Toast) => void
@@ -125,8 +111,7 @@ function ApiKeyField({
     fetch('/api/settings')
       .then((r) => r.json())
       .then((d: Record<string, unknown>) => {
-        const hasKeyField = fieldKey === 'openaiApiKey' ? 'hasOpenaiKey' : 'hasAnthropicKey'
-        const hasKey = d[hasKeyField]
+        const hasKey = d['hasGeminiKey']
         const masked = d[fieldKey] as string | null
         if (hasKey && masked) setSavedMasked(masked)
       })
@@ -305,7 +290,7 @@ function ModelSelector({
   onToast,
 }: {
   models: { value: string; label: string; description: string }[]
-  settingKey: 'anthropicModel' | 'openaiModel'
+  settingKey: 'geminiModel'
   defaultValue: string
   onToast: (t: Toast) => void
 }) {
@@ -364,161 +349,7 @@ function ModelSelector({
           <span className="text-xs text-zinc-600 shrink-0 hidden sm:block">{selected.description}</span>
         )}
       </div>
-      {value === 'claude-opus-4-6' && (
-        <p className="text-xs text-amber-500/80 mt-1.5">
-          Opus is slow with 20 parallel workers — consider Sonnet or Haiku for faster bulk categorization.
-        </p>
-      )}
     </>
-  )
-}
-
-interface CliStatus {
-  available: boolean
-  subscriptionType?: string
-  expired?: boolean
-}
-
-function ClaudeCliStatusBox() {
-  const [status, setStatus] = useState<CliStatus | null>(null)
-
-  useEffect(() => {
-    fetch('/api/settings/cli-status')
-      .then((r) => r.json())
-      .then((d: CliStatus) => setStatus(d))
-      .catch(() => setStatus({ available: false }))
-  }, [])
-
-  if (status === null) return null // loading — don't flash UI
-
-  if (status.available && !status.expired) {
-    const tier = status.subscriptionType
-      ? status.subscriptionType.charAt(0).toUpperCase() + status.subscriptionType.slice(1)
-      : 'CLI'
-    return (
-      <div className="flex gap-3 p-3.5 rounded-xl bg-emerald-500/5 border border-emerald-500/20 mb-5">
-        <Check size={15} className="text-emerald-400 shrink-0 mt-0.5" />
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-emerald-300">
-            Claude CLI detected — no API key needed
-          </p>
-          <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">
-            Signed in as <span className="text-zinc-300">{tier}</span> via Claude Code. Siftly will use your subscription automatically. An API key below will take priority if set.
-          </p>
-        </div>
-      </div>
-    )
-  }
-
-  if (status.available && status.expired) {
-    return (
-      <div className="flex gap-3 p-3.5 rounded-xl bg-amber-500/5 border border-amber-500/20 mb-5">
-        <AlertCircle size={15} className="text-amber-400 shrink-0 mt-0.5" />
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-amber-300">Claude CLI session expired</p>
-          <p className="text-xs text-zinc-500 mt-0.5">
-            Run <span className="font-mono text-zinc-300">claude</span> in your terminal to refresh the session, then reload this page.
-          </p>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="flex gap-3 p-3.5 rounded-xl bg-zinc-800/60 border border-zinc-700 mb-5">
-      <Terminal size={15} className="text-zinc-400 shrink-0 mt-0.5" />
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium text-zinc-200">No Claude CLI detected</p>
-        <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">
-          Install Claude Code and sign in to skip the API key entirely, or paste your API key below.
-        </p>
-      </div>
-    </div>
-  )
-}
-
-function CodexCliStatusBox() {
-  const [status, setStatus] = useState<{ available: boolean; expired?: boolean; planType?: string; authMode?: string } | null>(null)
-
-  useEffect(() => {
-    fetch('/api/settings/cli-status')
-      .then((r) => r.json())
-      .then((d: { codex?: { available: boolean; expired?: boolean; planType?: string; authMode?: string } }) => setStatus(d.codex ?? { available: false }))
-      .catch(() => setStatus({ available: false }))
-  }, [])
-
-  if (status === null) return null
-
-  if (status.available && !status.expired) {
-    const tier = status.planType
-      ? status.planType.charAt(0).toUpperCase() + status.planType.slice(1)
-      : 'CLI'
-    return (
-      <div className="flex gap-3 p-3.5 rounded-xl bg-emerald-500/5 border border-emerald-500/20 mb-5">
-        <Check size={15} className="text-emerald-400 shrink-0 mt-0.5" />
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-emerald-300">
-            Codex CLI detected — no API key needed
-          </p>
-          <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">
-            Signed in as <span className="text-zinc-300">{tier}</span> via Codex CLI. Siftly will use your credentials automatically. An API key below will take priority if set.
-          </p>
-        </div>
-      </div>
-    )
-  }
-
-  if (status.available && status.expired) {
-    return (
-      <div className="flex gap-3 p-3.5 rounded-xl bg-amber-500/5 border border-amber-500/20 mb-5">
-        <AlertCircle size={15} className="text-amber-400 shrink-0 mt-0.5" />
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium text-amber-300">Codex CLI session expired</p>
-          <p className="text-xs text-zinc-500 mt-0.5">
-            Run <span className="font-mono text-zinc-300">codex</span> in your terminal to refresh, then reload this page.
-          </p>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="flex gap-3 p-3.5 rounded-xl bg-zinc-800/60 border border-zinc-700 mb-5">
-      <Terminal size={15} className="text-zinc-400 shrink-0 mt-0.5" />
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium text-zinc-200">No Codex CLI detected</p>
-        <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">
-          Install Codex CLI and sign in to skip the API key entirely, or paste your OpenAI API key below.
-        </p>
-      </div>
-    </div>
-  )
-}
-
-function ProviderToggle({ value, onChange }: { value: 'anthropic' | 'openai'; onChange: (v: 'anthropic' | 'openai') => void }) {
-  return (
-    <div className="flex items-center gap-1 p-1 rounded-xl bg-zinc-800 border border-zinc-700 mb-5">
-      <button
-        onClick={() => onChange('anthropic')}
-        className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-          value === 'anthropic'
-            ? 'bg-indigo-600 text-white shadow-sm'
-            : 'text-zinc-400 hover:text-zinc-200'
-        }`}
-      >
-        Anthropic (Claude)
-      </button>
-      <button
-        onClick={() => onChange('openai')}
-        className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-          value === 'openai'
-            ? 'bg-emerald-600 text-white shadow-sm'
-            : 'text-zinc-400 hover:text-zinc-200'
-        }`}
-      >
-        OpenAI (GPT)
-      </button>
-    </div>
   )
 }
 
@@ -570,59 +401,32 @@ function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
     <Section
       icon={Key}
       title="AI Provider"
-      description="Choose your AI provider and configure keys. CLI auth means no key needed."
+      description="Configure your Google Gemini API key for AI-powered features."
     >
-      <ProviderToggle value={provider} onChange={(v) => void handleProviderChange(v)} />
-
-      {provider === 'anthropic' ? (
-        <>
-          <ClaudeCliStatusBox />
-          <div className="space-y-5">
-            <div>
-              <ApiKeyField
-                label="Anthropic (Claude)"
-                placeholder="sk-ant-api03-..."
-                fieldKey="anthropicApiKey"
-                hint="Used for AI categorization, search, and image analysis."
-                docHref="https://console.anthropic.com"
-                onToast={onToast}
-                testProvider="anthropic"
-              />
-              <ModelSelector
-                models={ANTHROPIC_MODELS}
-                settingKey="anthropicModel"
-                defaultValue="claude-haiku-4-5-20251001"
-                onToast={onToast}
-              />
-              <p className="text-xs text-zinc-500 mt-1.5">Applies to all AI operations — API key <strong className="text-zinc-400 font-medium">and Claude CLI</strong></p>
-            </div>
+      <div className="space-y-6">
+        {/* Gemini Configuration */}
+        <div>
+          <div className="flex items-center gap-2 mb-3">
+            <span className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Google (Gemini)</span>
           </div>
-        </>
-      ) : (
-        <>
-          <CodexCliStatusBox />
-          <div className="space-y-5">
-            <div>
-              <ApiKeyField
-                label="OpenAI"
-                placeholder="sk-..."
-                fieldKey="openaiApiKey"
-                hint="Used for AI categorization, search, and image analysis."
-                docHref="https://platform.openai.com/api-keys"
-                onToast={onToast}
-                testProvider="openai"
-              />
-              <ModelSelector
-                models={OPENAI_MODELS}
-                settingKey="openaiModel"
-                defaultValue="gpt-4.1-mini"
-                onToast={onToast}
-              />
-              <p className="text-xs text-zinc-500 mt-1.5">Applies to all AI operations — API key <strong className="text-zinc-400 font-medium">and Codex CLI</strong></p>
-            </div>
-          </div>
-        </>
-      )}
+          <ApiKeyField
+            label="API Key"
+            placeholder="AIzaSy..."
+            fieldKey="geminiApiKey"
+            hint="Used for AI categorization, search, and image analysis."
+            docHref="https://aistudio.google.com/apikey"
+            onToast={onToast}
+            testProvider="gemini"
+          />
+          <ModelSelector
+            models={GEMINI_MODELS}
+            settingKey="geminiModel"
+            defaultValue="gemini-3.1-flash-lite-preview"
+            onToast={onToast}
+          />
+          <p className="text-xs text-zinc-500 mt-1.5">Get your free API key from Google AI Studio.</p>
+        </div>
+      </div>
       <p className="text-xs text-zinc-600 mt-4">Keys are stored in plaintext in your local SQLite database (<code className="font-mono">prisma/dev.db</code>). Do not expose the database file.</p>
     </Section>
   )
@@ -756,7 +560,7 @@ function DangerZoneSection({ onToast }: { onToast: (t: Toast) => void }) {
 const TECH_STACK = [
   { label: 'Next.js 15', color: 'bg-zinc-800 text-zinc-300 border-zinc-700' },
   { label: 'Prisma + SQLite', color: 'bg-zinc-800 text-zinc-300 border-zinc-700' },
-  { label: 'Anthropic / OpenAI', color: 'bg-blue-500/10 text-blue-300 border-blue-500/20' },
+  { label: 'Google Gemini API', color: 'bg-blue-500/10 text-blue-300 border-blue-500/20' },
   { label: 'React Flow', color: 'bg-zinc-800 text-zinc-300 border-zinc-700' },
   { label: 'Tailwind CSS', color: 'bg-cyan-500/10 text-cyan-300 border-cyan-500/20' },
 ]

@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
 import { analyzeBatch } from '@/lib/vision-analyzer'
-import { AIClient, resolveAIClient } from '@/lib/ai-client'
-import { getProvider } from '@/lib/settings'
+import { getGeminiClient } from '@/lib/gemini-client'
+import { GenerativeModel } from '@google/generative-ai'
 
 // GET: returns progress stats
 export async function GET(): Promise<NextResponse> {
@@ -23,22 +23,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     // use default
   }
 
-  const provider = await getProvider()
-  const keyName = provider === 'openai' ? 'openaiApiKey' : 'anthropicApiKey'
-  const setting = await prisma.setting.findUnique({ where: { key: keyName } })
-  const dbKey = setting?.value?.trim()
+  // Get Gemini client (only supported provider)
+  const geminiModel = await getGeminiClient()
 
-  let client: AIClient | null = null
-  try {
-    client = await resolveAIClient({ dbKey })
-  } catch {
-    // SDK not available — will use CLI path for vision
+  if (!geminiModel) {
+    return NextResponse.json({ error: 'No Gemini API key configured. Add your key in Settings.' }, { status: 400 })
   }
 
-  return runAnalysis(client, batchSize)
+  return runAnalysis(geminiModel, batchSize)
 }
 
-async function runAnalysis(client: AIClient | null, batchSize: number): Promise<NextResponse> {
+async function runAnalysis(
+  geminiModel: GenerativeModel,
+  batchSize: number,
+): Promise<NextResponse> {
   const untagged = await prisma.mediaItem.findMany({
     where: { imageTags: null, type: { in: ['photo', 'gif'] } },
     take: batchSize,
@@ -49,7 +47,7 @@ async function runAnalysis(client: AIClient | null, batchSize: number): Promise<
     return NextResponse.json({ analyzed: 0, remaining: 0, message: 'All images already analyzed.' })
   }
 
-  const analyzed = await analyzeBatch(untagged, client)
+  const analyzed = await analyzeBatch(untagged, geminiModel)
 
   const remaining = await prisma.mediaItem.count({
     where: { imageTags: null, type: { in: ['photo', 'gif'] } },

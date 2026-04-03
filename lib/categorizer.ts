@@ -1,9 +1,7 @@
+import { GenerativeModel } from '@google/generative-ai'
 import prisma from '@/lib/db'
 import { buildImageContext } from '@/lib/image-context'
-import { getCliAvailability, claudePrompt, modelNameToCliAlias } from '@/lib/claude-cli-auth'
-import { getCodexCliAvailability, codexPrompt } from '@/lib/codex-cli'
-import { getActiveModel, getProvider } from '@/lib/settings'
-import { AIClient, resolveAIClient } from '@/lib/ai-client'
+import { getGeminiClient, getGeminiModel } from '@/lib/gemini-client'
 
 const BATCH_SIZE = 20
 
@@ -141,7 +139,6 @@ export async function seedDefaultCategories(): Promise<void> {
 
   for (const cat of DEFAULT_CATEGORIES) {
     if (existingSlugs.has(cat.slug)) {
-      // Sync name, color, and description so renames/updates propagate to existing DBs
       await prisma.category.update({
         where: { slug: cat.slug },
         data: { name: cat.name, color: cat.color, description: cat.description },
@@ -210,10 +207,10 @@ ${JSON.stringify(tweetData, null, 1)}`
 
 function parseCategorizationResponse(text: string, validSlugs: Set<string>): CategorizationResult[] {
   const jsonMatch = text.match(/\[[\s\S]*\]/)
-  if (!jsonMatch) throw new Error('No JSON array found in AI response')
+  if (!jsonMatch) throw new Error('No JSON array found in response')
 
   const parsed: unknown = JSON.parse(jsonMatch[0])
-  if (!Array.isArray(parsed)) throw new Error('Claude response is not an array')
+  if (!Array.isArray(parsed)) throw new Error('Response is not an array')
 
   return (parsed as Record<string, unknown>[]).map((item): CategorizationResult => {
     const tweetId = String(item.tweetId ?? '')
@@ -232,62 +229,33 @@ function parseCategorizationResponse(text: string, validSlugs: Set<string>): Cat
 
 export async function categorizeBatch(
   bookmarks: BookmarkForCategorization[],
-  client: AIClient | null,
+  geminiModel: GenerativeModel,
   categoryDescriptions: Record<string, string> = {},
   allSlugs: string[] = DEFAULT_SLUGS,
 ): Promise<CategorizationResult[]> {
   if (bookmarks.length === 0) return []
 
   const prompt = buildCategorizationPrompt(bookmarks, categoryDescriptions, allSlugs)
-  const provider = await getProvider()
 
-  // Prefer CLI over SDK (avoids OAuth token extraction, uses CLI directly)
-  if (provider === 'openai') {
-    if (await getCodexCliAvailability()) {
-      const result = await codexPrompt(prompt, { timeoutMs: 60_000 })
-      if (result.success && result.data) {
-        try {
-          return parseCategorizationResponse(result.data, new Set(allSlugs))
-        } catch (parseErr) {
-          console.warn('[categorize] Codex CLI response parse failed, falling back to SDK:', parseErr)
-        }
-      } else {
-        console.warn('[categorize] Codex CLI failed, falling back to SDK:', result.error)
+  const CATEGORIZE_RETRY_DELAYS = [2000, 5000]
+  for (let attempt = 0; attempt <= CATEGORIZE_RETRY_DELAYS.length; attempt++) {
+    try {
+      const result = await geminiModel.generateContent(prompt)
+      const text = result.response.text() ?? ''
+      try {
+        return parseCategorizationResponse(text, new Set(allSlugs))
+      } catch (parseErr) {
+        console.warn('[categorize] Gemini response parse failed:', parseErr)
       }
-    }
-  } else {
-    if (await getCliAvailability()) {
-      const model = await getActiveModel()
-      const cliModel = modelNameToCliAlias(model)
-
-      const result = await claudePrompt(prompt, { model: cliModel, timeoutMs: 60_000 })
-      if (result.success && result.data) {
-        try {
-          return parseCategorizationResponse(result.data, new Set(allSlugs))
-        } catch (parseErr) {
-          console.warn('[categorize] CLI response parse failed, falling back to SDK:', parseErr)
-        }
-      } else {
-        console.warn('[categorize] CLI failed, falling back to SDK:', result.error)
-      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err)
+      console.warn(`[categorize] Gemini batch failed (attempt ${attempt + 1}): ${errMsg.slice(0, 120)}`)
+      const isClientError = errMsg.includes('400') || errMsg.includes('401') || errMsg.includes('403') || errMsg.includes('422')
+      if (isClientError || attempt >= CATEGORIZE_RETRY_DELAYS.length) break
+      await new Promise((r) => setTimeout(r, CATEGORIZE_RETRY_DELAYS[attempt]))
     }
   }
-
-  // Fallback to SDK (requires API key)
-  if (!client) {
-    throw new Error('No CLI available and no API key configured.')
-  }
-
-  const model = await getActiveModel()
-  const response = await client.createMessage({
-    model,
-    max_tokens: 2048,
-    messages: [{ role: 'user', content: prompt }],
-  })
-
-  if (!response.text) throw new Error('No text content in AI response')
-
-  return parseCategorizationResponse(response.text, new Set(allSlugs))
+  return []
 }
 
 export async function writeCategoryResults(results: CategorizationResult[]): Promise<void> {
@@ -296,7 +264,6 @@ export async function writeCategoryResults(results: CategorizationResult[]): Pro
   const tweetIds = results.map((r) => r.tweetId).filter(Boolean)
   if (tweetIds.length === 0) return
 
-  // Batch-fetch all categories and bookmarks at once (eliminates N+1 queries)
   const [categories, bookmarks] = await Promise.all([
     prisma.category.findMany({ select: { id: true, slug: true } }),
     prisma.bookmark.findMany({
@@ -309,7 +276,6 @@ export async function writeCategoryResults(results: CategorizationResult[]): Pro
   const bookmarkByTweetId = new Map(bookmarks.map((b) => [b.tweetId, b.id]))
   const now = new Date()
 
-  // Collect all operations then execute in a single transaction (eliminates sequential await overhead)
   const upsertOps: ReturnType<typeof prisma.bookmarkCategory.upsert>[] = []
   const bookmarkIdsToUpdate: string[] = []
 
@@ -397,15 +363,11 @@ export async function categorizeAll(
 ): Promise<void> {
   await seedDefaultCategories()
 
-  // Resolve auth once — avoids re-resolving inside every batch call
-  const provider = await getProvider()
-  const keyName = provider === 'openai' ? 'openaiApiKey' : 'anthropicApiKey'
-  const apiKeySetting = await prisma.setting.findUnique({ where: { key: keyName } })
-  let client: AIClient | null = null
-  try {
-    client = await resolveAIClient({ dbKey: apiKeySetting?.value })
-  } catch {
-    // CLI might still work — client stays null
+  // Get Gemini client
+  const geminiModel = await getGeminiClient()
+  if (!geminiModel) {
+    console.error('[categorize] No Gemini API key configured')
+    return
   }
 
   // Load ALL categories (default + custom) for the prompt
@@ -415,7 +377,6 @@ export async function categorizeAll(
     dbCategories.map((c) => [c.slug, c.description?.trim() || c.name]),
   )
 
-  // Get total count for progress reporting (without loading all rows)
   let total = 0
   if (bookmarkIds.length > 0) {
     total = bookmarkIds.length
@@ -428,7 +389,6 @@ export async function categorizeAll(
   let done = 0
 
   if (bookmarkIds.length > 0) {
-    // Specific bookmark IDs — fetch in BATCH_SIZE chunks
     for (let i = 0; i < bookmarkIds.length; i += BATCH_SIZE) {
       if (shouldAbort?.()) break
       const batchIds = bookmarkIds.slice(i, i + BATCH_SIZE)
@@ -438,7 +398,7 @@ export async function categorizeAll(
       })
       const batch = rows.map(mapBookmarkForCategorization)
       try {
-        const results = await categorizeBatch(batch, client, categoryDescriptions, allSlugs)
+        const results = await categorizeBatch(batch, geminiModel, categoryDescriptions, allSlugs)
         await writeCategoryResults(results)
       } catch (err) {
         console.error(`Error categorizing batch at index ${i}:`, err)
@@ -447,7 +407,6 @@ export async function categorizeAll(
       onProgress?.(done, total)
     }
   } else {
-    // Cursor-based pagination — never loads all bookmarks into memory
     let cursor: string | undefined
     const where = force ? {} : { enrichedAt: null }
 
@@ -466,7 +425,7 @@ export async function categorizeAll(
 
       const batch = rows.map(mapBookmarkForCategorization)
       try {
-        const results = await categorizeBatch(batch, client, categoryDescriptions, allSlugs)
+        const results = await categorizeBatch(batch, geminiModel, categoryDescriptions, allSlugs)
         await writeCategoryResults(results)
       } catch (err) {
         console.error('Error categorizing batch:', err)
@@ -478,4 +437,6 @@ export async function categorizeAll(
       if (rows.length < BATCH_SIZE) break
     }
   }
+
+  void getGeminiModel // suppress unused import warning
 }
