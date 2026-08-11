@@ -209,7 +209,7 @@ function BookmarksPageInner() {
   const [bookmarks, setBookmarks] = useState<BookmarkWithMedia[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
-  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>('list')
   const searchRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const fetchBookmarks = useCallback(async (f: Filters) => {
@@ -461,7 +461,7 @@ function BookmarksPageInner() {
           page={filters.page}
           total={total}
           limit={PAGE_SIZE}
-          onChange={(p) => setFilters((prev) => ({ ...prev, page: p }))}
+          onChange={(p) => { setFilters((prev) => ({ ...prev, page: p })); window.scrollTo({ top: 0, behavior: 'smooth' }) }}
         />
       </div>
     </div>
