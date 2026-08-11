@@ -139,16 +139,20 @@ export default function Nav() {
       .then((d: { categories: CategoryItem[] }) => setCategories(d.categories ?? []))
       .catch(() => {})
 
-    // Poll pipeline status every 3s to show global indicator
+    // Poll pipeline status — fast (3s) when running, slow (30s) when idle
+    let interval: ReturnType<typeof setTimeout>
     function pollPipeline() {
       fetch('/api/categorize')
         .then((r) => r.json())
-        .then((d: PipelineStatus) => setPipeline(d))
-        .catch(() => {})
+        .then((d: PipelineStatus) => {
+          setPipeline(d)
+          const isActive = d.status === 'running' || d.status === 'stopping'
+          interval = setTimeout(pollPipeline, isActive ? 3000 : 30000)
+        })
+        .catch(() => { interval = setTimeout(pollPipeline, 30000) })
     }
     pollPipeline()
-    const interval = setInterval(pollPipeline, 3000)
-    return () => clearInterval(interval)
+    return () => clearTimeout(interval)
   }, [])
 
   const visibleCats = showAllCats ? categories : categories.slice(0, 8)
