@@ -146,6 +146,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         return
       }
 
+      // The guard above makes the client non-null, but the narrowing does not
+      // reach the hoisted helper functions below. This const carries it.
+      const geminiClient = geminiModel
+
       await seedDefaultCategories()
 
       if (force) {
@@ -223,7 +227,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
               })
               const batch = rows.map(mapBookmarkForCategorization)
               try {
-                const results = await categorizeBatch(batch, geminiModel, categoryDescriptions, allSlugs)
+                const results = await categorizeBatch(batch, geminiClient, categoryDescriptions, allSlugs)
                 await writeCategoryResults(results)
                 counts.categorized += ids.length
                 setState({ stageCounts: { ...counts } })
@@ -264,7 +268,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             try {
               await analyzeItem(
                 { id: media.id, url: media.url, thumbnailUrl: media.thumbnailUrl, type: media.type },
-                geminiModel,
+                geminiClient,
               )
               anyVisionRan = true
               counts.visionTagged++
@@ -301,7 +305,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
               try {
                 const results = await enrichBatchSemanticTags(
                   [{ id: bm.id, text: bm.text, imageTags, entities }],
-                  geminiModel,
+                  geminiClient,
                 )
                 const result = results[0]
                 if (result?.tags.length) {

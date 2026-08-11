@@ -759,7 +759,9 @@ function LiveImportTab({ onSynced }: { onSynced: (result: ImportResult) => void 
       if (!res.ok) throw new Error(data.error ?? 'Sync failed')
       const imported = data.imported ?? 0
       const skipped = data.skipped ?? 0
-      onSynced({ imported, skipped, total: imported + skipped })
+      // A live sync reads every tweet that it fetches, so parsed equals total.
+      const total = imported + skipped
+      onSynced({ imported, skipped, total, parsed: total })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sync failed')
     } finally {
