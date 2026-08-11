@@ -1,0 +1,65 @@
+# siftly.naveenreddy61.dev — Siftly bookmark portal (reverse proxy to 127.0.0.1:8002)
+# Install:
+#   sudo cp deploy/nginx-siftly.naveenreddy61.dev /etc/nginx/sites-available/siftly.naveenreddy61.dev
+#   sudo ln -sf /etc/nginx/sites-available/siftly.naveenreddy61.dev /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+#
+# Cloudflare: add siftly.naveenreddy61.dev (proxied) → this VPS
+#
+# Password: basic auth guards the whole vhost, the API routes included.
+#   sudo htpasswd -c /etc/nginx/.htpasswd-siftly <user>
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name siftly.naveenreddy61.dev;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name siftly.naveenreddy61.dev;
+
+    include snippets/naveenreddy61.dev-ssl.conf;   # Cloudflare origin cert
+    include snippets/cloudflare-allow.conf;         # only accept CF traffic
+
+    # One user only. The password guards every route, /api/ included.
+    auth_basic           "Siftly";
+    auth_basic_user_file /etc/nginx/.htpasswd-siftly;
+
+    # Bookmark JSON imports are large.
+    client_max_body_size 64m;
+    add_header X-Vhost siftly always;
+
+    # Tweet images come straight from twimg.com in the browser, so this
+    # host carries HTML and JSON only.
+    location / {
+        proxy_pass http://127.0.0.1:8002;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout  60s;
+        proxy_send_timeout  60s;
+    }
+
+    # AI search and the categorize pipeline run long. Give them more time
+    # and send bytes through as they arrive.
+    location /api/ {
+        proxy_pass http://127.0.0.1:8002;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering     off;
+        proxy_cache         off;
+        proxy_read_timeout  600s;
+        proxy_send_timeout  600s;
+    }
+
+    access_log /var/log/nginx/siftly.access.log;
+    error_log  /var/log/nginx/siftly.error.log;
+}

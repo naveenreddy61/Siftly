@@ -1,0 +1,23 @@
+# /etc/systemd/system/siftly.service
+# Install:
+#   sudo cp deploy/siftly.service /etc/systemd/system/siftly.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now siftly
+[Unit]
+Description=Siftly bookmark portal — siftly.naveenreddy61.dev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/projects/siftly
+# Next reads .env from WorkingDirectory.
+ExecStart=/usr/bin/npm run start -- --port 8002
+Restart=on-failure
+RestartSec=3
+Environment=NODE_ENV=production
+Environment=HOME=/root
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target
