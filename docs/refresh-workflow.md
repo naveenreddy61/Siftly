@@ -42,6 +42,9 @@ The command `npx next dev` uses port 3000. The script `npm run dev` uses port
 The cookies expire. A refresh fails with old cookies, so always get new cookies
 first.
 
+CAUTION: The two values in this stage give full access to the X account. Do not
+put them in a file that Git tracks. Do not send them to the VPS.
+
 1. Sign in to `https://x.com` in Chrome.
 2. Press `F12` to open the developer tools.
 3. Select the **Application** tab.
@@ -49,9 +52,6 @@ first.
 5. Find the row `auth_token`. Copy its value. The value has 40 characters.
 6. Find the row `ct0`. Copy its value. The value has approximately 160
    characters.
-
-CAUTION: These two values give full access to the X account. Do not put them in
-a file that Git tracks. Do not send them to the VPS.
 
 ## Stage 3 — Save the Cookies
 
@@ -61,9 +61,13 @@ database rows.
 ### Method A — The User Interface
 
 1. Open `http://localhost:3000/import`.
-2. Find the live sync section.
-3. Put the two values in the two fields.
-4. Select the save control.
+2. Select the **Live Import** tab.
+3. Find the **X Session Cookies** panel.
+4. Put the `auth_token` value in the first field.
+5. Put the `ct0` value in the second field.
+6. Select **Save Credentials**.
+
+The panel then shows the text `Credentials saved`.
 
 ### Method B — The Command Line
 
@@ -176,6 +180,43 @@ the service, replaces the file, and starts the service again.
 
 3. Open `https://siftly.naveenreddy61.dev` in the browser and sign in.
 
+## How to Update the Code on the VPS
+
+The script `push-to-vps.sh` sends the database only. It does not send code.
+Therefore a change to a page, a component, or a route needs this separate
+procedure.
+
+Do this procedure only when you changed the code. A data refresh does not need
+it.
+
+1. Commit the change on the local machine and push it to `origin/main`.
+2. Do a type check first. The command `next dev` does not check types, but
+   `npm run build` does:
+
+   ```bash
+   npx tsc --noEmit
+   ```
+
+3. If step 2 gives an error, correct the error. A type error stops the build on
+   the VPS.
+4. Update the code on the VPS and start the service again:
+
+   ```bash
+   ssh vps-rsync 'set -e; cd /root/projects/siftly; git fetch origin -q; git reset --hard origin/main -q; npm ci; npx prisma generate; npm run build; systemctl restart siftly'
+   ```
+
+5. Confirm that the service is active:
+
+   ```bash
+   ssh vps-rsync 'systemctl is-active siftly'
+   ```
+
+   The result must be `active`.
+
+WARNING: Do not copy `node_modules` from the local machine to the VPS. The local
+machine uses a macOS binary. The VPS needs a Linux binary. The command `npm ci`
+on the VPS makes the correct binary.
+
 ## Important Limits
 
 The VPS is for browsing only. Each push replaces the whole database file.
@@ -262,8 +303,11 @@ ssh -t vps-rsync htpasswd -B /etc/nginx/.htpasswd-siftly naveen
 ```
 
 WARNING: The command `htpasswd` needs a real terminal. Without a terminal it
-accepts an empty password and gives no error. After the command, do a test of
-the result:
+accepts an empty password and gives no error. An empty password gives full access
+to the portal. Do not run this command through the `!` prefix in Claude Code,
+because that is not a terminal. Use a terminal window.
+
+After the command, do a test of the result:
 
 ```bash
 ssh vps-rsync 'htpasswd -vb /etc/nginx/.htpasswd-siftly naveen ""'
