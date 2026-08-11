@@ -22,7 +22,7 @@ import {
 } from 'lucide-react'
 
 const GEMINI_MODELS = [
-  { value: 'gemini-3.1-flash-lite-preview', label: 'Gemini 3.1 Flash Lite Preview', description: 'Lightweight Preview' },
+  { value: 'gemini-flash-lite-latest', label: 'Gemini Flash Lite (latest)', description: 'Always tracks the current Flash Lite model' },
 ]
 
 interface Toast {
@@ -421,7 +421,7 @@ function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
           <ModelSelector
             models={GEMINI_MODELS}
             settingKey="geminiModel"
-            defaultValue="gemini-3.1-flash-lite-preview"
+            defaultValue="gemini-flash-lite-latest"
             onToast={onToast}
           />
           <p className="text-xs text-zinc-500 mt-1.5">Get your free API key from Google AI Studio.</p>

@@ -9,7 +9,7 @@ function maskKey(raw: string | null): string | null {
 }
 
 const ALLOWED_GEMINI_MODELS = [
-  'gemini-3.1-flash-lite-preview',
+  'gemini-flash-lite-latest',
 ] as const
 
 export async function GET(): Promise<NextResponse> {
@@ -24,7 +24,7 @@ export async function GET(): Promise<NextResponse> {
     return NextResponse.json({
       geminiApiKey: maskKey(gemini?.value ?? null),
       hasGeminiKey: gemini !== null,
-      geminiModel: geminiModel?.value ?? 'gemini-3.1-flash-lite-preview',
+      geminiModel: geminiModel?.value ?? 'gemini-flash-lite-latest',
       xOAuthClientId: maskKey(xClientId?.value ?? null),
       xOAuthClientSecret: maskKey(xClientSecret?.value ?? null),
       hasXOAuth: !!xClientId?.value,

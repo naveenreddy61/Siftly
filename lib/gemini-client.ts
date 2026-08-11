@@ -11,7 +11,7 @@ let _modelCacheExpiry = 0
 export async function getGeminiModel(): Promise<string> {
   if (_cachedModel && Date.now() < _modelCacheExpiry) return _cachedModel
   const setting = await prisma.setting.findUnique({ where: { key: 'geminiModel' } })
-  _cachedModel = setting?.value ?? 'gemini-3.1-flash-lite-preview'
+  _cachedModel = setting?.value ?? 'gemini-flash-lite-latest'
   _modelCacheExpiry = Date.now() + 5 * 60 * 1000
   return _cachedModel!
 }
