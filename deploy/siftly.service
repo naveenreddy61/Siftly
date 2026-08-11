@@ -12,7 +12,9 @@ Type=simple
 User=root
 WorkingDirectory=/root/projects/siftly
 # Next reads .env from WorkingDirectory.
-ExecStart=/usr/bin/npm run start -- --port 8002
+# Bind to localhost only. nginx is the only route in, so the password
+# cannot be bypassed even if the firewall opens this port.
+ExecStart=/usr/bin/npm run start -- --hostname 127.0.0.1 --port 8002
 Restart=on-failure
 RestartSec=3
 Environment=NODE_ENV=production
