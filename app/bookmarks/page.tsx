@@ -17,7 +17,7 @@ import * as Select from '@radix-ui/react-select'
 import BookmarkCard from '@/components/bookmark-card'
 import type { BookmarkWithMedia, BookmarksResponse } from '@/lib/types'
 
-const PAGE_SIZE = 24
+const PAGE_SIZE = 100
 
 interface Filters {
   q: string
