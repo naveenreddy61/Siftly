@@ -18,25 +18,37 @@ npx next dev
 
 App runs at **http://localhost:3000**
 
-## AI Authentication — No API Key Needed
+## AI Provider — Gemini
 
-If the user is signed into Claude Code CLI, **Siftly uses their Claude subscription automatically**. No API key configuration required.
+Siftly uses the Google Gemini API for categorization, semantic tags, image
+analysis, and search. It does not use Anthropic or OpenAI.
 
-How it works:
-- `lib/claude-cli-auth.ts` reads the OAuth token from the macOS keychain (`Claude Code-credentials`)
-- Uses `authToken` + `anthropic-beta: oauth-2025-04-20` header in the Anthropic SDK
-- Falls back to: DB-saved API key → `ANTHROPIC_API_KEY` env var → local proxy
+- `lib/gemini-client.ts` holds the client and the model name.
+- The model name is the floating alias `gemini-flash-lite-latest`. The alias
+  always points to the current model, so a new model needs no migration.
+- `app/api/settings/route.ts` holds `ALLOWED_GEMINI_MODELS`. A model that is
+  absent from this list gives status 400 on a save.
+- The key comes from the `geminiApiKey` database row first. Then it comes from
+  the `GOOGLE_GENERATIVE_AI_API_KEY` or `GEMINI_API_KEY` environment variable.
 
-To verify it's working, hit: `GET /api/settings/cli-status`
+To do a test of the key and the model:
+
+```bash
+curl -X POST http://localhost:3000/api/settings/test \
+  -H 'Content-Type: application/json' -d '{"provider":"gemini"}'
+```
+
+The response `{"working":true}` shows success.
 
 ## Key Commands
 
 ```bash
 npx next dev          # Start dev server (port 3000)
+npm run dev           # Start dev server (port 4000)
 npx tsc --noEmit      # Type check
 npx prisma studio     # Database GUI
 npx prisma db push    # Apply schema changes to DB
-npm run build         # Production build
+npm run build         # Production build (type-checks; next dev does not)
 ```
 
 ## Project Structure
@@ -44,12 +56,13 @@ npm run build         # Production build
 ```
 app/
   api/
-    categorize/       # 4-stage AI pipeline (start/stop/status via SSE)
+    categorize/       # AI pipeline — POST start, GET status by polling, DELETE stop
     import/           # Bookmark JSON import + dedup
-    search/ai/        # FTS5 + Claude semantic search
+      live/           # X cookie credentials + POST sync — the refresh path
+      x-oauth/        # X OAuth flow — present but unused
+    search/ai/        # FTS5 + Gemini semantic search
     settings/
-      cli-status/     # GET — returns Claude CLI auth status
-      test/           # POST — validates API key or CLI auth
+      test/           # POST — validates the Gemini key and model
     analyze/images/   # Vision analysis progress + trigger
     bookmarks/        # CRUD + filtering
     categories/       # Category management
@@ -63,7 +76,9 @@ app/
   categorize/         # Pipeline monitor
 
 lib/
-  claude-cli-auth.ts  # Claude CLI OAuth session (macOS keychain)
+  gemini-client.ts    # Gemini client, model alias, API key resolution
+  x-sync.ts           # X bookmark sync + optional scheduler
+  twitter-api.ts      # X API calls with the auth_token and ct0 cookies
   categorizer.ts      # AI categorization + default categories
   vision-analyzer.ts  # Image vision + semantic tagging
   fts.ts              # SQLite FTS5 full-text search
@@ -78,7 +93,7 @@ prisma/schema.prisma  # SQLite schema (Bookmark, Category, MediaItem, Setting, I
 
 - **Next.js 16** (App Router, TypeScript)
 - **Prisma 7** + **SQLite** (local, zero setup, FTS5 built in)
-- **Anthropic SDK** — vision, tagging, categorization, search
+- **@google/generative-ai** — vision, tagging, categorization, search
 - **@xyflow/react** — mindmap graph
 - **Tailwind CSS v4**
 
@@ -104,11 +119,29 @@ npm run siftly -- stats                              # Alternative via npm scrip
 
 | Task | How |
 |------|-----|
-| Run AI pipeline | `POST /api/categorize` with `{}` body; `GET /api/categorize` for SSE progress |
-| Add category | Edit `DEFAULT_CATEGORIES` in `lib/categorizer.ts` — description is passed verbatim to Claude |
+| Refresh bookmarks and update the VPS | See `docs/refresh-workflow.md` |
+| Run AI pipeline | `POST /api/categorize` with `{}` body. Read `GET /api/categorize` for progress. |
+| Add category | Edit `DEFAULT_CATEGORIES` in `lib/categorizer.ts` — description is passed verbatim to Gemini |
 | Add known tool | Append domain to `KNOWN_TOOL_DOMAINS` in `lib/rawjson-extractor.ts` |
-| Test API auth | `POST /api/settings/test` with `{"provider":"anthropic"}` |
-| Check CLI auth | `GET /api/settings/cli-status` |
+| Test API auth | `POST /api/settings/test` with `{"provider":"gemini"}` |
+| Change the model | Edit `ALLOWED_GEMINI_MODELS` in `app/api/settings/route.ts` first, or a save gives status 400 |
+
+## Deployment
+
+The portal runs at `https://siftly.naveenreddy61.dev`. Basic authentication in
+nginx guards every route. `docs/refresh-workflow.md` holds the full procedure.
+
+- The local machine is the only writer. It holds the X cookies and runs the
+  pipeline.
+- The VPS holds a read copy. `scripts/push-to-vps.sh` sends the database and
+  removes the X cookies from the copy.
+- Each push replaces the whole file. A category change or a settings change made
+  on the VPS is lost.
+- The VPS files are in `/root/projects/siftly`. The service name is `siftly`. The
+  app listens on `127.0.0.1:8002`.
+- Use the Secure Shell alias `vps-rsync` for a command. The alias `vps` starts a
+  tmux session, so it cannot take a command.
+- `deploy/` holds the nginx site file and the systemd unit file.
 
 ## Database
 
