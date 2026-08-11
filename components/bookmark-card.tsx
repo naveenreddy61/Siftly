@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useRef, useEffect, useState } from 'react'
-import { ExternalLink, Download, Play, Pencil, X, Check, ImageOff, Bookmark, Globe } from 'lucide-react'
+import { ExternalLink, Download, Play, Pencil, X, Check, ImageOff, Bookmark, Globe, Copy } from 'lucide-react'
 import type { BookmarkWithMedia, Category } from '@/lib/types'
 
 // ── URL helpers ────────────────────────────────────────────────────────────────
@@ -583,8 +583,8 @@ interface BookmarkCardProps {
 
 export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
   const [categories, setCategories] = useState(bookmark.categories)
-  const [expanded, setExpanded] = useState(false)
   const [editingCategories, setEditingCategories] = useState(false)
+  const [copied, setCopied] = useState(false)
 
   const tweetUrl = (bookmark.authorHandle && bookmark.authorHandle !== 'unknown')
     ? `https://twitter.com/${bookmark.authorHandle}/status/${bookmark.tweetId}`
@@ -600,9 +600,7 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
   // Show link preview only when there's no real media attached
   const previewUrl = !hasMedia && tcoUrls.length > 0 ? tcoUrls[tcoUrls.length - 1] : null
 
-  const TEXT_LIMIT = 280
-  const isLong = cleanText.length > TEXT_LIMIT
-  const displayText = expanded || !isLong ? cleanText : cleanText.slice(0, TEXT_LIMIT)
+  const displayText = cleanText
 
   const currentCategoryIds = new Set(categories.map((c) => c.id))
 
@@ -702,28 +700,6 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
           {displayText.length > 0 && (
             <p className="text-sm text-zinc-200 leading-relaxed">
               {displayText}
-              {isLong && !expanded && (
-                <span>
-                  {'… '}
-                  <button
-                    onClick={() => setExpanded(true)}
-                    className="text-indigo-400 hover:text-indigo-300 transition-colors"
-                  >
-                    more
-                  </button>
-                </span>
-              )}
-              {isLong && expanded && (
-                <span>
-                  {' '}
-                  <button
-                    onClick={() => setExpanded(false)}
-                    className="text-zinc-500 hover:text-zinc-400 transition-colors text-xs"
-                  >
-                    less
-                  </button>
-                </span>
-              )}
             </p>
           )}
           {!displayText && !firstMedia && !previewUrl && (
@@ -751,8 +727,8 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
             )}
           </div>
 
-          {/* Row 2: edit button — always in DOM to reserve space; invisible until hover */}
-          <div className="mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          {/* Row 2: edit button + copy button — always in DOM to reserve space; invisible until hover */}
+          <div className="mt-1.5 flex items-center justify-between opacity-0 group-hover:opacity-100 transition-opacity">
             <button
               onClick={() => setEditingCategories((v) => !v)}
               className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs text-zinc-700 hover:text-zinc-300 hover:bg-zinc-800 border border-transparent hover:border-zinc-700 transition-all"
@@ -761,6 +737,21 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
               <Pencil size={10} />
               edit
             </button>
+            {displayText.length > 0 && (
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(displayText).then(() => {
+                    setCopied(true)
+                    setTimeout(() => setCopied(false), 1500)
+                  })
+                }}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-xs text-zinc-700 hover:text-zinc-300 hover:bg-zinc-800 border border-transparent hover:border-zinc-700 transition-all"
+                title="Copy text"
+              >
+                {copied ? <Check size={10} className="text-green-400" /> : <Copy size={10} />}
+                {copied ? 'copied' : 'copy'}
+              </button>
+            )}
           </div>
 
           {editingCategories && (
